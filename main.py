@@ -9,12 +9,64 @@ from prompt import (
 from llm_manager import call_llm
 from workspace_manager import WorkspaceManager
 
+MAX_FILE_GENERATION_RETRIES = 3
+AUTO_RERUN_AFTER_FIX = True
+MAX_FIX_ATTEMPTS = 4
+STOP_AFTER_FIRST_FILE_PATCH = True
+
 
 def extract_json_from_response(text: str):
     """
     Extract the first valid JSON object or array from an LLM response.
-    Handles markdown, explanations, and malformed wrappers.
+
+    Handles:
+    - Markdown code fences
+    - Explanatory text
+    - Literal newlines inside JSON string values
+    - Large source code payloads
     """
+
+    # ---------------------------------------------------------
+    # Helper: sanitize invalid control characters inside strings
+    # ---------------------------------------------------------
+    def sanitize_json_text(raw_text: str) -> str:
+        result = []
+
+        in_string = False
+        escaped = False
+
+        for ch in raw_text:
+
+            if escaped:
+                result.append(ch)
+                escaped = False
+                continue
+
+            if ch == "\\":
+                result.append(ch)
+                escaped = True
+                continue
+
+            if ch == '"':
+                result.append(ch)
+                in_string = not in_string
+                continue
+
+            if in_string:
+                if ch == "\n":
+                    result.append("\\n")
+                    continue
+
+                if ch == "\r":
+                    continue
+
+                if ch == "\t":
+                    result.append("\\t")
+                    continue
+
+            result.append(ch)
+
+        return "".join(result)
 
     # ---------------------------------------------------------
     # Attempt 1: Direct parse
@@ -34,8 +86,11 @@ def extract_json_from_response(text: str):
     )
 
     for block in code_blocks:
+
+        sanitized = sanitize_json_text(block)
+
         try:
-            return json.loads(block)
+            return json.loads(sanitized)
         except json.JSONDecodeError:
             continue
 
@@ -84,10 +139,15 @@ def extract_json_from_response(text: str):
             depth -= 1
 
             if depth == 0:
+
                 candidate = text[start:i + 1]
+
+                # NEW: sanitize invalid control chars
+                candidate = sanitize_json_text(candidate)
 
                 try:
                     return json.loads(candidate)
+
                 except json.JSONDecodeError as e:
                     raise ValueError(
                         f"Located JSON block but parsing failed: {e}"
@@ -113,6 +173,103 @@ def flatten_tree(tree: dict, current_path: str = "") -> list:
 
     return file_paths
 
+
+def is_documentation_file(filepath: str) -> bool:
+    """
+    Files that should contain documentation rather than source code.
+    """
+    filepath = filepath.lower()
+
+    return filepath.endswith(
+        (
+            ".md",
+            ".rst",
+            ".txt",
+        )
+    )
+
+
+def looks_like_real_code(filepath: str, code: str) -> bool:
+    """
+    Lightweight heuristic to determine whether generated content
+    is likely actual source code rather than a description.
+    """
+
+    if not code:
+        return False
+
+    filename = filepath.split("/")[-1]
+
+    # Documentation files
+    if is_documentation_file(filepath):
+        return (
+            "#" in code
+            or "##" in code
+            or len(code.splitlines()) >= 5
+        )
+
+    # Gitignore files
+    if filename == ".gitignore":
+        return len(code.strip()) > 0
+    
+
+    # Allow empty __init__.py files
+    if filename == "__init__.py":
+        return True
+
+    code = code.strip()
+
+    if len(code) < 50:
+        return False
+
+    extension = filepath.split(".")[-1].lower()
+
+    indicators = {
+        "py": [
+            "def ",
+            "class ",
+            "import ",
+            "from ",
+            "if __name__",
+            "=",
+        ],
+        "js": [
+            "function ",
+            "const ",
+            "let ",
+            "export ",
+            "import ",
+            "=>",
+        ],
+        "html": [
+            "<html",
+            "<body",
+            "<head",
+            "<div",
+            "<!DOCTYPE",
+        ],
+        "css": [
+            "{",
+            "}",
+            ":",
+            ";",
+        ],
+        "json": [
+            "{",
+            "}",
+        ],
+        "toml": [
+            "[",
+            "=",
+        ],
+    }
+
+    expected = indicators.get(extension)
+
+    if expected:
+        return any(token in code for token in expected)
+
+    return len(code.splitlines()) >= 3
 
 # ------------------------------------------------------------------
 # 1. Initialize Workspace
@@ -207,6 +364,7 @@ try:
 
     tech_stack = planning_data.get("tech_stack", "")
     execution_command = planning_data.get("execution_command", "")
+    original_execution_command = execution_command
     project_structure = planning_data.get("structure")
 
     if not isinstance(project_structure, dict):
@@ -240,42 +398,139 @@ for filepath in files_to_build:
 
     print(f"\n⚙️ Generating: {filepath}")
 
-    file_messages = get_file_generation_messages(
-        requirements=user_prompt,
-        target_file=filepath,
-        shared_context=global_state,
-    )
+    success = False
 
-    raw_file_response = call_llm(file_messages)
+    for generation_attempt in range(
+        1,
+        MAX_FILE_GENERATION_RETRIES + 1,
+    ):
 
-    try:
-        parsed_response = extract_json_from_response(raw_file_response)
-
-        if not isinstance(parsed_response, dict):
-            raise ValueError(
-                f"Expected JSON object, got {type(parsed_response).__name__}"
-            )
-
-        file_code = parsed_response.get("code")
-        file_summary = parsed_response.get(
-            "summary",
-            "No summary provided."
+        file_messages = get_file_generation_messages(
+            requirements=user_prompt,
+            target_file=filepath,
+            shared_context=global_state,
         )
 
-        if file_code is None:
-            raise ValueError("Missing required field: code")
+        # File-type-specific instructions
+        if filepath.lower().endswith(".md"):
+            file_messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "Generate complete Markdown documentation. "
+                        "Do NOT generate source code. "
+                        "Do NOT place full implementation code in the README."
+                    ),
+                }
+            )
 
-        workspace.write_file(filepath, file_code)
+        elif filepath.lower().endswith(".gitignore"):
+            file_messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "Generate only valid .gitignore contents. "
+                        "Do not generate explanations or source code."
+                    ),
+                }
+            )
 
-        global_state[filepath] = file_summary
+        if generation_attempt > 1:
+            file_messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        f"The previous generation for "
+                        f"{filepath} did not contain "
+                        f"complete source code.\n\n"
+                        f"Generate the COMPLETE file again.\n"
+                        f"Do not provide placeholders.\n"
+                        f"Do not provide descriptions.\n"
+                        f"Do not summarize code.\n"
+                        f"Return actual executable source code."
+                    ),
+                }
+            )
 
-        print(f"✅ Saved {filepath}")
+        raw_file_response = call_llm(file_messages)
 
-    except Exception as e:
-        print(f"❌ Failed to generate {filepath}: {e}")
-        print("\nResponse Preview:\n")
-        print(raw_file_response[:500])
+        try:
 
+            parsed_response = extract_json_from_response(
+                raw_file_response
+            )
+
+            if not isinstance(parsed_response, dict):
+                raise ValueError(
+                    f"Expected JSON object, got "
+                    f"{type(parsed_response).__name__}"
+                )
+
+            file_code = parsed_response.get("code")
+            file_summary = parsed_response.get(
+                "summary",
+                "No summary provided."
+            )
+
+            if file_code is None:
+                raise ValueError(
+                    "Missing required field: code"
+                )
+
+            if not looks_like_real_code(
+                filepath,
+                file_code,
+            ):
+                raise ValueError(
+                    "Generated content does not appear "
+                    "to be executable source code."
+                )
+
+            workspace.write_file(
+                filepath,
+                file_code,
+            )
+
+            global_state[filepath] = file_summary
+
+            print(f"✅ Saved {filepath}")
+
+            success = True
+            break
+
+        except Exception as e:
+
+            print(
+                f"⚠️ Generation attempt "
+                f"{generation_attempt}/"
+                f"{MAX_FILE_GENERATION_RETRIES} "
+                f"failed for {filepath}: {e}"
+            )
+
+            if (
+                generation_attempt
+                == MAX_FILE_GENERATION_RETRIES
+            ):
+                print(
+                    f"❌ Could not generate "
+                    f"{filepath} after "
+                    f"{MAX_FILE_GENERATION_RETRIES} "
+                    f"attempts."
+                )
+
+                print(
+                    "\nResponse Preview:\n"
+                )
+
+                print(
+                    raw_file_response[:500]
+                )
+
+    if not success:
+        print(
+            f"⚠️ Skipping file due to "
+            f"generation failures: {filepath}"
+        )
 
 # ------------------------------------------------------------------
 # 5. Phase 3: Execution + Auto Fix Loop
@@ -288,18 +543,33 @@ if execution_command:
         f"`{execution_command}`"
     )
 
-    max_fix_attempts = 4
-
+    max_fix_attempts = MAX_FIX_ATTEMPTS
+    patched_file_this_cycle = False
     for attempt in range(1, max_fix_attempts + 1):
+
+    # Execution command is immutable after planning
+        execution_command = original_execution_command
 
         exit_code, terminal_output = workspace.execute_command(
             execution_command
         )
 
+        failure_markers = [
+            "Traceback",
+            "SyntaxError",
+            "ModuleNotFoundError",
+            "ImportError",
+            "ValueError",
+            "TypeError",
+            "AttributeError",
+        ]
+
         execution_success = (
             exit_code == 0
-            and "Traceback" not in terminal_output
-            and "Error" not in terminal_output
+            and not any(
+                marker in terminal_output
+                for marker in failure_markers
+            )
         )
 
         if execution_success:
@@ -316,7 +586,16 @@ if execution_command:
             f"(Attempt {attempt}/{max_fix_attempts})"
         )
 
-        print(f"\nTerminal Output:\n{terminal_output[:500]}... [truncated]\n")
+        preview = (
+            terminal_output[-2000:]
+            if len(terminal_output) > 2000
+            else terminal_output
+        )
+
+        print(
+            f"\nTerminal Output (last 2000 chars):\n"
+            f"{preview}\n"
+        )
 
         if attempt == max_fix_attempts:
             print(
@@ -333,8 +612,8 @@ if execution_command:
         fix_messages = get_error_fix_messages(
             requirements=user_prompt,
             tech_stack=tech_stack,
-            execution_command=execution_command,
-            error_log=terminal_output,
+            execution_command=original_execution_command,
+            error_log=terminal_output[-10000:],
             shared_context=global_state,
         )
 
@@ -351,10 +630,11 @@ if execution_command:
                 "summary",
                 "Auto-generated fix."
             )
-            new_cmd = fix_data.get("new_execution_command")
+            # new_cmd = fix_data.get("new_execution_command")
 
             # Apply File Fixes
             if file_to_fix and fixed_code:
+
                 workspace.write_file(
                     file_to_fix,
                     fixed_code
@@ -362,23 +642,45 @@ if execution_command:
 
                 global_state[file_to_fix] = fix_summary
 
+                patched_file_this_cycle = True
+
                 print(
                     f"🩹 Patched {file_to_fix}\n"
                     f"Reason: {fix_summary}"
                 )
+
+                if STOP_AFTER_FIRST_FILE_PATCH:
+                    print(
+                        "\n⏹️ STOP_AFTER_FIRST_FILE_PATCH=True"
+                        "\nStopping execution loop after first successful patch."
+                    )
+                    break
             
             # Apply Command Fixes
-            if new_cmd and new_cmd != execution_command:
-                print(f"🔄 Agent updated execution command: `{execution_command}` -> `{new_cmd}`")
-                execution_command = new_cmd
+            # if new_cmd and new_cmd != execution_command:
+            #     print(f"🔄 Agent updated execution command: `{execution_command}` -> `{new_cmd}`")
+            #     execution_command = new_cmd
             
-            if not file_to_fix and not new_cmd:
-                print("❌ Agent did not return a valid file to fix or a new command.")
+            # if not file_to_fix and not new_cmd:
+            #     print("❌ Agent did not return a valid file to fix or a new command.")
+            if not file_to_fix:
+                print(
+                    "❌ Agent did not identify a file to fix."
+                )
 
         except Exception as e:
             print(
                 f"❌ Failed to apply auto-fix: {e}"
             )
+        if patched_file_this_cycle:
+            if not AUTO_RERUN_AFTER_FIX:
+
+                print(
+                    "\n⏹️ AUTO_RERUN_AFTER_FIX=False"
+                    "\nStopping after successful patch."
+                )
+
+                break
 
 else:
     print(

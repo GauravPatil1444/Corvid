@@ -79,14 +79,21 @@ Terminal Output / Error Log (Truncated):
 Context of files built so far:
 {shared_context}
 
-Analyze the error. If a file is broken, rewrite the file. If the execution command is wrong (e.g. pointing to the wrong directory), provide a corrected command.
+Analyze the error and determine which file is causing the failure.
+
+IMPORTANT RULES:
+1. The execution command is LOCKED and must NEVER be changed.
+2. Do NOT suggest changes to the workspace structure.
+3. Do NOT suggest uv init, npm init, pip install, uv add, poetry install, or any environment setup commands.
+4. Fix ONLY project source files or configuration files already present in the generated project.
+5. If multiple files may be involved, choose the file most likely responsible for the error.
 
 Output ONLY valid JSON matching this schema. Do not include markdown blocks.
+
 {{
-    "file_to_fix": "path/to/the/broken/file.ext", 
-    "code": "The COMPLETE rewritten code for this file. Leave empty if only the command needs changing.",
-    "summary": "Brief explanation of what you fixed",
-    "new_execution_command": "Provide a new terminal command ONLY IF the current one is wrong. Otherwise, leave empty."
+    "file_to_fix": "path/to/the/broken/file.ext",
+    "code": "The COMPLETE rewritten code for this file",
+    "summary": "Brief explanation of what was fixed"
 }}
 """
 
@@ -109,3 +116,23 @@ def get_error_fix_messages(requirements: str, tech_stack: str, execution_command
         {"role": "system", "content": system_content},
         {"role": "user", "content": "Fix the error and return the JSON payload."}
     ]
+
+# Safety Layer: Context Summarization
+CONTEXT_SUMMARIZATION_PROMPT = """
+You are an AI context compressor. The input text exceeds token limits and must be aggressively summarized without losing critical technical data.
+
+CRITICAL RULES:
+1. Preserve all file paths, class names, function signatures, and exact error tracebacks.
+2. Remove conversational filler, redundant instructions, and obvious boilerplate descriptions.
+3. Condense the history of generated files into a dense technical map.
+
+Output ONLY the compressed text.
+"""
+
+def get_summarization_messages(long_text: str) -> list:
+    return [
+        {"role": "system", "content": CONTEXT_SUMMARIZATION_PROMPT},
+        {"role": "user", "content": f"COMPRESS THIS TEXT:\n\n{long_text}"}
+    ]
+
+
