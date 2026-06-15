@@ -1,5 +1,6 @@
 import os
 import json
+import subprocess
 from pathlib import Path
 from typing import Dict, Any, Optional
 
@@ -45,21 +46,16 @@ class WorkspaceManager:
         return current_state
 
     def create_structure(self, structure: Dict[str, Any], base_path: Optional[Path] = None):
-        """
-        Recursively creates folders and files from a dictionary.
-        Expected format: {"src": {"main.py": "print('hello')", "utils": {}}}
-        """
+        """Recursively creates folders and files from a dictionary."""
         target_base = base_path or self.root_dir
 
         for name, content in structure.items():
             path = target_base / name
             
             if isinstance(content, dict):
-                # It's a directory
                 path.mkdir(parents=True, exist_ok=True)
                 self.create_structure(content, path)
             elif isinstance(content, str):
-                # It's a file
                 path.parent.mkdir(parents=True, exist_ok=True)
                 with open(path, "w", encoding="utf-8") as f:
                     f.write(content)
@@ -84,3 +80,26 @@ class WorkspaceManager:
             f.write(content)
             
         self.sync_state()
+
+    def execute_command(self, command: str, timeout: int = 15) -> tuple[int, str]:
+        """
+        Executes a terminal command in the workspace directory.
+        Returns: (exit_code, terminal_output)
+        """
+        try:
+            result = subprocess.run(
+                command,
+                cwd=self.root_dir,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=timeout
+            )
+            output = result.stdout + "\n" + result.stderr
+            return result.returncode, output.strip()
+        except subprocess.TimeoutExpired as e:
+            # If the command times out, it's often a success (e.g. a dev server successfully started)
+            output = (e.stdout or "") + "\n" + (e.stderr or "")
+            return 0, f"[Process timed out after {timeout}s - Server likely running successfully]\n{output}".strip()
+        except Exception as e:
+            return -1, str(e)

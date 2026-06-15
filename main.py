@@ -4,6 +4,7 @@ import re
 from prompt import (
     get_planning_messages,
     get_file_generation_messages,
+    get_error_fix_messages,
 )
 from llm_manager import call_llm
 from workspace_manager import WorkspaceManager
@@ -12,19 +13,11 @@ from workspace_manager import WorkspaceManager
 def extract_json_from_response(text: str):
     """
     Extract the first valid JSON object or array from an LLM response.
-
-    Handles:
-    - Pure JSON
-    - Markdown code fences
-    - Explanatory text before/after JSON
-    - Large JSON payloads efficiently
-
-    Returns:
-        Parsed Python object
+    Handles markdown, explanations, and malformed wrappers.
     """
 
     # ---------------------------------------------------------
-    # Attempt 1: direct parse
+    # Attempt 1: Direct parse
     # ---------------------------------------------------------
     try:
         return json.loads(text)
@@ -32,7 +25,7 @@ def extract_json_from_response(text: str):
         pass
 
     # ---------------------------------------------------------
-    # Attempt 2: markdown code blocks
+    # Attempt 2: Markdown code blocks
     # ---------------------------------------------------------
     code_blocks = re.findall(
         r"```(?:json)?\s*(.*?)\s*```",
@@ -47,7 +40,7 @@ def extract_json_from_response(text: str):
             continue
 
     # ---------------------------------------------------------
-    # Attempt 3: brace matching
+    # Attempt 3: Brace matching
     # ---------------------------------------------------------
     start = None
 
@@ -91,7 +84,7 @@ def extract_json_from_response(text: str):
             depth -= 1
 
             if depth == 0:
-                candidate = text[start : i + 1]
+                candidate = text[start:i + 1]
 
                 try:
                     return json.loads(candidate)
@@ -105,7 +98,7 @@ def extract_json_from_response(text: str):
 
 def flatten_tree(tree: dict, current_path: str = "") -> list:
     """
-    Recursively converts a JSON tree into a flat list of file paths.
+    Converts nested directory structure into a flat list of files.
     """
 
     file_paths = []
@@ -122,98 +115,279 @@ def flatten_tree(tree: dict, current_path: str = "") -> list:
 
 
 # ------------------------------------------------------------------
-# 1. Initialize workspace
+# 1. Initialize Workspace
 # ------------------------------------------------------------------
 
 workspace = WorkspaceManager("./my_new_project")
 
 # ------------------------------------------------------------------
-# 2. User requirements
+# 2. User Prompt
 # ------------------------------------------------------------------
 
-user_prompt = "build a jumping dinosaur game in html css js"
+user_prompt = """
+Build a command-line application that reads student exam data from a CSV file, computes statistics, assigns letter grades, and produces a formatted summary report. This assignment practises OOP design, file I/O, and input validation — all essential before touching any web framework.
+ 
+ 
+Problem statement
+ 
+Your company runs internal training exams. After each exam, HR exports a CSV with student names and three subject scores. They want an automated tool that reads this file, calculates averages, maps to letter grades, identifies top and bottom performers, and writes a clean summary CSV for management.
+ 
+ 
+Project setup
+ 
+Use uv to initialise the project: uv init <project-name>
+ 
+Add dependencies: uv add <package>
+ 
+Run scripts: uv run python main.py
+ 
+File structure is your choice — organise logically using pyproject.toml as the project root
+ 
+ 
+Input format
+ 
+CSV file with header: Name,Math,Science,English
+ 
+Each row = one student with three integer scores (0–100)
+ 
+Must handle at least 10 students
+ 
+Example row:  Rahul Sharma,88,72,90
+ 
+ 
+Requirements
+ 
+Student class: stores name and three scores; has methods average() → float and grade() → str
+ 
+Grade mapping: A=90–100, B=75–89, C=60–74, D=45–59, F=below 45
+ 
+GradeBook class: holds list of Student objects; methods — load_csv(path), save_summary(path), top_performers(n=3), class_average()
+ 
+file_handler.py: read_csv(path) → list[dict], write_csv(path, data)
+ 
+validators.py: validate_score(value) raises ValueError if score < 0 or > 100
+ 
+main.py: accepts input CSV path as a command-line argument (sys.argv)
+ 
+Handle FileNotFoundError with a friendly message — do not crash
+ 
+Handle rows with missing or non-numeric scores — skip the row and print a warning
+ 
+ 
+Expected output
+ 
+Console: print class average, top 3 students, count of each grade
+ 
+summary.csv columns: Name, Math, Science, English, Average, Grade
+ 
+Average rounded to 2 decimal places
+ 
+ 
+Sample output
+ 
+Class average: 76.40
+ 
+Top performers: Rahul Sharma (92.33), Priya Patel (89.00), ...
+ 
+Grade distribution: A=2  B=5  C=2  D=1  F=0
+
+"""
 
 # ------------------------------------------------------------------
-# 3. Phase 1: Plan architecture
+# 3. Phase 1: Planning
 # ------------------------------------------------------------------
 
-print("🧠 Phase 1: Planning Directory Structure...")
+print("🧠 Phase 1: Planning Project Architecture...")
 
 plan_messages = get_planning_messages(user_prompt)
 raw_plan_response = call_llm(plan_messages)
 
 try:
-    project_structure = extract_json_from_response(raw_plan_response)
+    planning_data = extract_json_from_response(raw_plan_response)
+
+    tech_stack = planning_data.get("tech_stack", "")
+    execution_command = planning_data.get("execution_command", "")
+    project_structure = planning_data.get("structure")
 
     if not isinstance(project_structure, dict):
         raise ValueError(
-            f"Expected project structure dictionary, got {type(project_structure).__name__}"
+            "Planning response missing valid 'structure' object."
         )
 
     workspace.create_structure(project_structure)
 
     files_to_build = flatten_tree(project_structure)
 
+    print(f"📦 Tech Stack: {tech_stack}")
+    print(f"▶ Execution Command: {execution_command}")
     print(f"📋 Planned {len(files_to_build)} files.")
 
 except Exception as e:
     print(f"❌ Failed to parse planning output: {e}")
-    print("\nRaw planning response:\n")
+    print("\nRaw response:\n")
     print(raw_plan_response)
     raise SystemExit(1)
 
+# ------------------------------------------------------------------
+# 4. Phase 2: Stateful File Generation
+# ------------------------------------------------------------------
 
-# ------------------------------------------------------------------
-# 3.5 Filter Out Binary Files
-# ------------------------------------------------------------------
-BINARY_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.gif', '.ico', '.mp3', '.wav', '.mp4', '.ttf')
-
-# Filter the list so the LLM only tries to write text/code files
-files_to_build = [f for f in files_to_build if not f.lower().endswith(BINARY_EXTENSIONS)]
-print(f"📋 Filtered out binary files. {len(files_to_build)} text/code files to generate.")
-
-# ------------------------------------------------------------------
-# 4. Phase 2: Stateful File Generation with Retries
-# ------------------------------------------------------------------
 global_state = {}
-MAX_RETRIES = 3
 
 print("\n🚀 Phase 2: Stateful File Generation...")
+
 for filepath in files_to_build:
-    print(f"\n⚙️ Generating code for: {filepath}")
-    
-    success = False
-    
-    # The Retry Loop
-    for attempt in range(1, MAX_RETRIES + 1):
+
+    print(f"\n⚙️ Generating: {filepath}")
+
+    file_messages = get_file_generation_messages(
+        requirements=user_prompt,
+        target_file=filepath,
+        shared_context=global_state,
+    )
+
+    raw_file_response = call_llm(file_messages)
+
+    try:
+        parsed_response = extract_json_from_response(raw_file_response)
+
+        if not isinstance(parsed_response, dict):
+            raise ValueError(
+                f"Expected JSON object, got {type(parsed_response).__name__}"
+            )
+
+        file_code = parsed_response.get("code")
+        file_summary = parsed_response.get(
+            "summary",
+            "No summary provided."
+        )
+
+        if file_code is None:
+            raise ValueError("Missing required field: code")
+
+        workspace.write_file(filepath, file_code)
+
+        global_state[filepath] = file_summary
+
+        print(f"✅ Saved {filepath}")
+
+    except Exception as e:
+        print(f"❌ Failed to generate {filepath}: {e}")
+        print("\nResponse Preview:\n")
+        print(raw_file_response[:500])
+
+
+# ------------------------------------------------------------------
+# 5. Phase 3: Execution + Auto Fix Loop
+# ------------------------------------------------------------------
+
+if execution_command:
+
+    print(
+        f"\n🖥️ Phase 3: Running execution command: "
+        f"`{execution_command}`"
+    )
+
+    max_fix_attempts = 4
+
+    for attempt in range(1, max_fix_attempts + 1):
+
+        exit_code, terminal_output = workspace.execute_command(
+            execution_command
+        )
+
+        execution_success = (
+            exit_code == 0
+            and "Traceback" not in terminal_output
+            and "Error" not in terminal_output
+        )
+
+        if execution_success:
+
+            print(
+                f"✅ Execution successful!\n\n"
+                f"Terminal Output:\n{terminal_output}"
+            )
+
+            break
+
+        print(
+            f"⚠️ Execution failed "
+            f"(Attempt {attempt}/{max_fix_attempts})"
+        )
+
+        print(f"\nTerminal Output:\n{terminal_output[:500]}... [truncated]\n")
+
+        if attempt == max_fix_attempts:
+            print(
+                "🛑 Max fix attempts reached. "
+                "Manual intervention required."
+            )
+            break
+
+        print(
+            "🛠️ Asking agent to analyze logs and "
+            "generate a fix..."
+        )
+
+        fix_messages = get_error_fix_messages(
+            requirements=user_prompt,
+            tech_stack=tech_stack,
+            execution_command=execution_command,
+            error_log=terminal_output,
+            shared_context=global_state,
+        )
+
+        raw_fix_response = call_llm(fix_messages)
+
         try:
-            file_messages = get_file_generation_messages(user_prompt, filepath, global_state)
-            raw_file_response = call_llm(file_messages)
+            fix_data = extract_json_from_response(
+                raw_fix_response
+            )
+
+            file_to_fix = fix_data.get("file_to_fix")
+            fixed_code = fix_data.get("code")
+            fix_summary = fix_data.get(
+                "summary",
+                "Auto-generated fix."
+            )
+            new_cmd = fix_data.get("new_execution_command")
+
+            # Apply File Fixes
+            if file_to_fix and fixed_code:
+                workspace.write_file(
+                    file_to_fix,
+                    fixed_code
+                )
+
+                global_state[file_to_fix] = fix_summary
+
+                print(
+                    f"🩹 Patched {file_to_fix}\n"
+                    f"Reason: {fix_summary}"
+                )
             
-            # Catch completely empty responses before passing to the parser
-            if not raw_file_response or not raw_file_response.strip():
-                raise ValueError("Received an empty response from the LLM.")
+            # Apply Command Fixes
+            if new_cmd and new_cmd != execution_command:
+                print(f"🔄 Agent updated execution command: `{execution_command}` -> `{new_cmd}`")
+                execution_command = new_cmd
             
-            parsed_response = extract_json_from_response(raw_file_response)
-            
-            file_code = parsed_response.get("code", "")
-            file_summary = parsed_response.get("summary", "No summary provided.")
-            
-            # Save and update memory
-            workspace.write_file(filepath, file_code)
-            global_state[filepath] = file_summary
-            
-            print(f"✅ Saved {filepath} | Memory updated.")
-            success = True
-            break  # Exit the retry loop because it succeeded
-            
+            if not file_to_fix and not new_cmd:
+                print("❌ Agent did not return a valid file to fix or a new command.")
+
         except Exception as e:
-            print(f"⚠️ Attempt {attempt}/{MAX_RETRIES} failed for {filepath}. Error: {e}")
-            if attempt == MAX_RETRIES:
-                print(f"❌ Skipping {filepath} after {MAX_RETRIES} failed attempts.")
-                print(f"Raw response preview: {raw_file_response[:100] if 'raw_file_response' in locals() and raw_file_response else 'None'}...")
+            print(
+                f"❌ Failed to apply auto-fix: {e}"
+            )
 
-    if not success:
-        print(f"🛑 Critical failure on {filepath}. The final project may not function correctly.")
+else:
+    print(
+        "\n⚠️ No execution command provided by planner. "
+        "Skipping Phase 3."
+    )
 
-print("\n🎉 Project Generation Complete!")
+# ------------------------------------------------------------------
+# Done
+# ------------------------------------------------------------------
+
+print("\n🎉 Agent Workflow Complete!")
