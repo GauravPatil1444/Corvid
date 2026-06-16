@@ -7,11 +7,12 @@ load_dotenv()
 
 MODELS: List[str] = [
     "groq/compound",
-    "groq/compound-mini",
     "openai/gpt-oss-120b",
-    "openai/gpt-oss-20b",
-    "openai/gpt-oss-safeguard-20b",
+    "qwen/qwen3-32b",
     "meta-llama/llama-4-scout-17b-16e-instruct",
+    "llama-3.3-70b-versatile",
+    "openai/gpt-oss-20b",
+    "groq/compound-mini",
     "llama-3.1-8b-instant"
 ]
 

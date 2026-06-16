@@ -1,3 +1,25 @@
+# Phase 0: Supervisor / Intent Routing
+
+INTENT_PROMPT = """
+Analyze the user's request and determine their intent.
+If they want to build, scaffold, or create a new project/script from scratch, return "CREATE".
+If they are asking to change, modify, fix, update, or refactor an existing project, return "EDIT".
+
+Output ONLY a JSON object matching this schema. Do not include markdown fences. Ensure the key is wrapped in double quotes.
+{{
+    "intent": "CREATE" | "EDIT"
+}}
+
+User Request: {user_prompt}
+"""
+
+def get_intent_messages(user_prompt: str) -> list:
+    return [
+        {"role": "system", "content": "You are an intent router. Output only valid JSON."},
+        {"role": "user", "content": INTENT_PROMPT.format(user_prompt=user_prompt)}
+    ]
+
+
 # Phase 1: Architecture Planning
 PLANNING_SYSTEM_PROMPT = """
 You are a software architect. Convert the user's requirements into a JSON project structure.
@@ -31,12 +53,17 @@ def get_planning_messages(requirements: str) -> list:
 # Phase 2: Stateful File Generation
 FILE_GENERATION_PROMPT = """
 You are an expert developer building a project piece by piece.
-Return ONLY valid JSON. Do not wrap the response in markdown.
+
+CRITICAL JSON RULES:
+1. Output ONLY a single, valid JSON object. Do NOT output a JSON array/list.
+2. The "code" value MUST have all internal double quotes escaped (e.g., \\"string\\").
+3. The "code" value MUST have all newlines explicitly escaped as \\n. Do not output literal newlines inside the JSON string.
+4. If writing Python, use explicit relative imports (e.g., `from .utils import X`) or absolute imports from the root.
 
 The response schema is:
 {{
-    "code": "...",
-    "summary": "..."
+    "code": "The complete, properly escaped source code for this file.",
+    "summary": "Brief technical summary of what was written."
 }}
 
 Context of what has been built so far:
@@ -62,7 +89,7 @@ def get_file_generation_messages(requirements: str, target_file: str, shared_con
     
     return [
         {"role": "system", "content": system_content},
-        {"role": "user", "content": f"Generate the code and summary for {target_file}."}
+        {"role": "user", "content": f"Generate the code and summary for {target_file}. Remember to explicitly escape all quotes and newlines inside the JSON."}
     ]
 
 # Phase 3: Error Fixing
@@ -135,4 +162,64 @@ def get_summarization_messages(long_text: str) -> list:
         {"role": "user", "content": f"COMPRESS THIS TEXT:\n\n{long_text}"}
     ]
 
+
+# 1. Chunk Summarization (For indexing)
+CHUNK_SUMMARY_PROMPT = """
+Analyze this code chunk and provide a brief technical summary.
+Describe its purpose, business role, and side effects.
+Return ONLY the summary string, no markdown.
+Code:
+{content}
+"""
+
+def get_chunk_summary_messages(content: str) -> list:
+    return [{"role": "user", "content": CHUNK_SUMMARY_PROMPT.format(content=content)}]
+
+# 2. Relevance Verification Layer
+VERIFICATION_PROMPT = """
+User Request: {query}
+Retrieved Chunk ({chunk_id}):
+{content}
+Summary: {summary}
+
+Determine whether this specific chunk MUST be modified to fulfill the user request.
+Output JSON format:
+{{
+    "relevant": true/false,
+    "confidence": 0.0-1.0,
+    "reason": "..."
+}}
+"""
+
+def get_verification_messages(query: str, chunk: dict) -> list:
+    return [{"role": "user", "content": VERIFICATION_PROMPT.format(
+        query=query, chunk_id=chunk['chunk_id'], content=chunk['content'], summary=chunk['summary']
+    )}]
+
+# 3. Patch Editing
+EDIT_CHUNK_PROMPT = """
+User Request: {query}
+Chunk ID: {chunk_id}
+File: {file_path}
+
+Current Chunk:
+{content}
+
+RULES:
+1. Modify ONLY this chunk to satisfy the request.
+2. Preserve external interfaces and indentation.
+3. Output ONLY valid JSON containing the complete replacement code. 
+4. CRITICAL: You MUST return the ENTIRE, complete replacement chunk. Do NOT use placeholders like `// ... rest of code` or ``. If the chunk is an entire file, you must output the entire updated file.
+
+Output JSON format:
+{{
+    "chunk_id": "{chunk_id}",
+    "updated_chunk": "..."
+}}
+"""
+
+def get_edit_messages(query: str, chunk: dict) -> list:
+    return [{"role": "user", "content": EDIT_CHUNK_PROMPT.format(
+        query=query, chunk_id=chunk['chunk_id'], file_path=chunk['file_path'], content=chunk['content']
+    )}]
 
