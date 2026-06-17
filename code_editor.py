@@ -19,6 +19,12 @@ class CodeEditor:
         chunks = get_ast_chunks(file_path, source_code)
 
         for chunk in chunks:
+            existing_hash = self.db.get_chunk_hash(chunk["chunk_id"])
+            if existing_hash == chunk["content_hash"]:
+                print(f"⏭️ Skipping (Unchanged): {chunk['chunk_id']}")
+                continue 
+
+            print(f"🔄 Embedding changed/new chunk: {chunk['chunk_id']}")
             # 1. Generate Summary
             summary_msg = get_chunk_summary_messages(chunk['content'])
             chunk['summary'] = call_llm(summary_msg).strip()
@@ -61,15 +67,33 @@ class CodeEditor:
         # 3. Patch Generation
         print(f"✍️ Generating patch for {target_chunk['chunk_id']}...")
         edit_msgs = get_edit_messages(user_query, target_chunk)
-        raw_edit = call_llm(edit_msgs)
-        try:
-            edit_data = extract_json_from_response(raw_edit)
-        except ValueError as e:
-            print(f"⚠️ LLM generated invalid JSON while patching. Skipping chunk")
-            print(f"Detailed error: {e}")
-
+        
+        MAX_RETRIES = 3
+        edit_data = None
+        
+        for attempt in range(1, MAX_RETRIES + 1):
+            raw_edit = call_llm(edit_msgs)
+            
+            # Safely extract JSON
+            try:
+                edit_data = extract_json_from_response(raw_edit)
+                break  # Success! Escape the retry loop.
+            except ValueError as e:
+                print(f"⚠️ Attempt {attempt}/{MAX_RETRIES} failed: Invalid JSON. Retrying...")
+                if attempt == MAX_RETRIES:
+                    print("❌ Max retries reached. Aborting edit.")
+                    return
+            
         updated_code = edit_data.get("updated_chunk")
-
+        
+        if not updated_code:
+            print("❌ Failed to extract 'updated_chunk' from JSON payload.")
+            return
+            
+        # Unescape flattened LLM strings BEFORE splicing
+        if "\\n" in updated_code:
+            updated_code = updated_code.replace("\\n", "\n").replace("\\t", "\t")
+      
         # 4. Patch Application (Line Splicing)
         file_path = target_chunk['file_path']
         full_source = self.workspace.read_file(file_path).splitlines()

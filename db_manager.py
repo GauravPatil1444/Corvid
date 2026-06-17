@@ -20,6 +20,13 @@ class DatabaseManager:
         # 2. THEN register the vector type with psycopg2
         register_vector(self.conn)
 
+    def get_chunk_hash(self, chunk_id: str) -> str:
+        """Retrieves the hash of an existing chunk to see if it changed."""
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT content_hash FROM code_chunks WHERE chunk_id = %s", (chunk_id,))
+            result = cur.fetchone()
+            return result[0] if result else None
+
     def _ensure_database_exists(self):
         """
         Connects to the default 'postgres' database to check if the target 
