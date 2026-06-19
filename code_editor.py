@@ -55,7 +55,7 @@ class CodeEditor:
                 print(f"⚠️ Verification LLM failed to return valid JSON. Skipping chunk")
                 continue # Safely skip to the next chunk instead of crashing!
             
-            if verification.get("relevant") and verification.get("confidence", 0) > 0.8:
+            if verification.get("relevant") and verification.get("confidence", 0) > 0.65:
                 print(f"🎯 LLM verified chunk {candidate['chunk_id']} as target.")
                 target_chunk = candidate
                 break
@@ -65,34 +65,65 @@ class CodeEditor:
             return
 
         # 3. Patch Generation
+        # 3. Patch Generation & Self-Correction Loop
         print(f"✍️ Generating patch for {target_chunk['chunk_id']}...")
         edit_msgs = get_edit_messages(user_query, target_chunk)
         
         MAX_RETRIES = 3
-        edit_data = None
+        updated_code = None
+        feedback = ""
+        file_path = target_chunk['file_path']
         
         for attempt in range(1, MAX_RETRIES + 1):
+            if feedback:
+                # Inject the failure reason directly into the LLM's brain for the next try!
+                print(f"⚠️ Attempt {attempt - 1} failed. Retrying with feedback: {feedback}")
+                edit_msgs.append({
+                    "role": "user", 
+                    "content": f"Your previous attempt was rejected. Reason: {feedback}\nReview the syntax carefully, fix the errors, and try again."
+                })
+
             raw_edit = call_llm(edit_msgs)
             
-            # Safely extract JSON
             try:
                 edit_data = extract_json_from_response(raw_edit)
-                break  # Success! Escape the retry loop.
             except ValueError as e:
-                print(f"⚠️ Attempt {attempt}/{MAX_RETRIES} failed: Invalid JSON. Retrying...")
-                if attempt == MAX_RETRIES:
-                    print("❌ Max retries reached. Aborting edit.")
-                    return
+                feedback = f"Invalid JSON format. You failed to escape quotes or formatting. Error: {e}"
+                continue
+                
+            candidate_code = edit_data.get("updated_chunk")
+            justification = edit_data.get("justification", "No justification provided.")
             
-        updated_code = edit_data.get("updated_chunk")
-        
+            if not candidate_code:
+                feedback = "You forgot to include the 'updated_chunk' key in your JSON."
+                continue
+                
+            # Unescape flattened LLM strings
+            if "\\n" in candidate_code:
+                candidate_code = candidate_code.replace("\\n", "\n").replace("\\t", "\t")
+
+            # ---------------------------------------------------------
+            # THE CRITIC: Programmatic Syntax Verification
+            # ---------------------------------------------------------
+            # If it's a Python file, we can natively test if the code is corrupted!
+            if file_path.endswith('.py'):
+                import ast
+                try:
+                    # This will instantly catch unwanted '/' or broken indentation
+                    ast.parse(candidate_code)
+                except SyntaxError as e:
+                    feedback = f"SyntaxError in generated Python code: {e}. You added invalid characters or broke the formatting. Check your output wisely."
+                    continue
+
+            # If it passes JSON extraction and Syntax checks, we accept the patch!
+            updated_code = candidate_code
+            print(f"🧠 AI Justification: {justification}")
+            break
+            
         if not updated_code:
-            print("❌ Failed to extract 'updated_chunk' from JSON payload.")
+            print("❌ Max retries reached. The AI repeatedly generated corrupted code. Aborting edit to protect your file.")
             return
-            
-        # Unescape flattened LLM strings BEFORE splicing
-        if "\\n" in updated_code:
-            updated_code = updated_code.replace("\\n", "\n").replace("\\t", "\t")
+
       
         # 4. Patch Application (Line Splicing)
         file_path = target_chunk['file_path']

@@ -5,18 +5,27 @@ from code_editor import CodeEditor
 # ------------------------------------------------------------------
 # Configuration
 # ------------------------------------------------------------------
-WORKSPACE_DIR = "./my_existing_project" # Point this to the codebase you want to debug
+# WORKSPACE_DIR = "./my_existing_project" # Point this to the codebase you want to debug
 
 # Directories we absolutely do NOT want to vectorize
 IGNORE_DIRS = {
-    ".git", "node_modules", "__pycache__", ".venv", "venv", 
-    "env", "dist", "build", ".idea", ".vscode", "coverage"
+    "node_modules", "__pycache__", "venv", "env", "dist", 
+    "build", "public","coverage", "out", "target", "bin", "obj", "tmp"
+}
+
+# ---------------------------------------------------------
+# NEW: Specific auto-generated or heavy files to ignore
+# ---------------------------------------------------------
+IGNORE_FILES = {
+    "package-lock.json", "package.json","yarn.lock", "pnpm-lock.yaml", 
+    "poetry.lock", "Pipfile.lock", "Cargo.lock", 
+    ".DS_Store", "thumbs.db"
 }
 
 # Only parse files that contain human-readable code
 VALID_EXTENSIONS = (
     ".py", ".js", ".ts", ".tsx", ".jsx", ".java", ".sql", 
-    ".html", ".css", ".json", ".yaml", ".yml"
+    ".html", ".css", ".toml", ".yaml", ".yml"
 )
 
 def get_source_files(directory: str) -> list:
@@ -27,10 +36,17 @@ def get_source_files(directory: str) -> list:
 
     source_files = []
     for root, dirs, files in os.walk(directory):
-        # Mutate the dirs list in-place to ignore heavy folders like node_modules
-        dirs[:] = [d for d in dirs if d not in IGNORE_DIRS]
+        # Aggressively prune the directory tree in-place
+        dirs[:] = [
+            d for d in dirs 
+            if d not in IGNORE_DIRS 
+            and not d.startswith('.')
+        ]
         
         for file in files:
+            if file.startswith('.') or file in IGNORE_FILES:
+                continue
+                
             if file.lower().endswith(VALID_EXTENSIONS):
                 # Get the full path first
                 full_path = os.path.join(root, file)
@@ -68,21 +84,50 @@ def run_debugger(workspace_dir: str, bug_report: str):
     editor.apply_edit(bug_report)
 
 if __name__ == "__main__":
-    # ------------------------------------------------------------------
-    # 1. Update the index with the latest state of your local files
-    # ------------------------------------------------------------------
-    # (Note: Because your DB uses UPSERT, running this repeatedly is fast and safe. 
-    # It will only update chunks that have actually changed.)
-    run_indexer(WORKSPACE_DIR)
+    import argparse
     
-    # ------------------------------------------------------------------
-    # 2. Feed the error log or change request to the RAG Editor
-    # ------------------------------------------------------------------
-    bug_request = """
-    Choice: 7
-Report exported
-Report exported
-why is this printed two times only display single time
-    """
+    # 1. Setup command line arguments
+    parser = argparse.ArgumentParser(description="Corvid AI Debugger")
+    parser.add_argument("command", choices=["start", "init"], help="Initialize the AI in the current directory")
+    args = parser.parse_args()
+
+    import os
     
-    run_debugger(WORKSPACE_DIR, bug_request)
+    # 2. Dynamically grab the directory passed from the batch file!
+    # (If run directly via python without the .bat, it safely falls back to os.getcwd)
+    current_workspace = os.environ.get("TARGET_WORKSPACE", os.getcwd())
+    
+    print(f"\n🦅 Corvid AI initializing in: {current_workspace}")
+    
+    # 3. Vectorize the current directory (skips unchanged files automatically!)
+    run_indexer(current_workspace)
+    
+    # 4. Start the interactive chat loop
+    print("\n" + "="*50)
+    print("Ready! Type your bug or feature request below.")
+    print("Type 'exit' or 'quit' to close the assistant.")
+    print("="*50)
+    
+    while True:
+        try:
+            # Get the user prompt
+            user_input = input("\n💬 What changes should I make?\n> ")
+            
+            # Handle exit commands
+            if user_input.lower().strip() in ['exit', 'quit']:
+                print("🦅 Corvid powering down. Goodbye!")
+                break
+                
+            # Skip empty inputs
+            if not user_input.strip():
+                continue
+                
+            # Trigger the debugger
+            run_debugger(current_workspace, user_input)
+            
+        except KeyboardInterrupt:
+            # Gracefully handle Ctrl+C
+            print("\n🦅 Corvid powering down. Goodbye!")
+            break
+        except Exception as e:
+            print(f"\n❌ An unexpected error occurred: {e}")

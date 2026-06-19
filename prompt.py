@@ -187,7 +187,7 @@ Output JSON format:
 {{
     "relevant": true/false,
     "confidence": 0.0-1.0,
-    "reason": "..."
+    "justification": "Explain why this file and code block matches the user's prompt.",
 }}
 """
 
@@ -214,7 +214,8 @@ RULES:
 Output JSON format:
 {{
     "chunk_id": "{chunk_id}",
-    "updated_chunk": "..."
+    "updated_chunk": "...",
+    "justification": "Explain exactly what you changed and why it fulfills the user's request without breaking existing logic.",
 }}
 """
 
