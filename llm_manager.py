@@ -2,6 +2,7 @@ import os
 from typing import List, Dict
 from groq import Groq
 from dotenv import load_dotenv
+from schemas import ArchitectPlan, EditorAction
 
 load_dotenv()
 
@@ -99,3 +100,13 @@ def call_llm(messages: List[Dict[str, str]], temperature: float = 0.2, retries: 
         else:
             print(f"❌ Unhandled error with {selected_model}: {e}")
             return call_llm(messages, temperature, retries + 1)
+
+def call_local_llm(messages: List[Dict[str, str]]) -> EditorAction:
+    """Invokes Qwen-2.5-coder:3b via Ollama."""
+    # Convert messages to Ollama format
+    response = requests.post(
+        "http://localhost:11434/api/chat",
+        json={"model": "qwen2.5-coder:3b", "messages": messages, "stream": False, "format": "json"}
+    )
+    data = response.json()["message"]["content"]
+    return EditorAction.model_validate_json(data)
